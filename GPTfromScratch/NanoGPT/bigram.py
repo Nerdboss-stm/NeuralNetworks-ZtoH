@@ -15,7 +15,7 @@ eval_iters = 200
 
 torch.manual_seed(1337) # for reproducibility
 
-with open('input.txt', 'r', encoding='utf-8') as f:
+with open('GPTfromScratch/NanoGPT/input.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
 # Create a set of all unique characters in the text
@@ -53,7 +53,7 @@ def estimate_loss():
             X, Y = get_batch(split)
             logits, loss = model(X, Y)
             losses[k] = loss.item()
-        out[split] = losses.mean() # For better visualization, we will return the mean loss over all eval_iters
+        out[split] = losses.mean() # For better visualization, we will return the mean loss over all eval_iters (Less noisy)
     model.train()
     return out
 
