@@ -3,14 +3,17 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 # HyperParameters
-batch_size = 32 # How many independent sequences we process in parallel?
-block_size = 8 # what is the maximum context length for predictions?
+batch_size = 64 # How many independent sequences we process in parallel?
+block_size = 256 # what is the maximum context length for predictions?
 max_iters = 5000
 eval_interval = 500
-learning_rate = 1e-3
+learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_embd = 32
+n_embd = 384
+n_heads = 6
+n_layer = 6
+dropout = 0.2
 
 #--------------
 
@@ -70,6 +73,8 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias = False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # Lower triangular matrix to mask out future tokens
 
+        self.dropout = nn.Dropout(dropout) # Dropout layer to prevent overfitting
+
     def forward(self, x):
         B, T, C = x.shape
         k = self.query(x) # (B, T, C)
@@ -78,6 +83,8 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5 # (B, T, C) @ (B, C, T) (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
         wei = F.softmax(wei, dim=-1) # (B, T, T)
+        wei = self.dropout(wei) # Apply dropout to the attention weights
+        # Perform the weighted sum of the values
         v = self.value(x) # (B, T, C)
         out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
         return out
@@ -89,10 +96,46 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd) # Linear layer to project the concatenated output of all heads back to the original embedding size
+        self.dropout = nn.Dropout(dropout) # Dropout layer to prevent overfitting
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        out = self.dropout(out)
         return out
+
+class FeedForwardnetwork(nn.Module):
+    " A simple linear layer followed by a non-linearity"
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 *n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd), # projection Layer going back to the Residual Pathway
+            nn.Dropout(dropout) # Dropout layer to prevent overfitting
+            )
+    
+    def forward(self, x):
+        return self.net(x)
+
+
+class Block(nn.Module):
+    " Transformer block: communication followed by computation"
+
+    def __init__(self, n_embd, num_heads):
+        super().__init__()
+        head_size = n_embd // num_heads
+        self.sa_heads = MultiHeadAttention(num_heads, head_size)
+        self.ffwd = FeedForwardnetwork(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+        x = x + self.sa_heads(self.ln1(x)) # Residual connection
+        x = x + self.ffwd(self.ln2(x)) # Residual connection
+        return x
 
 # Super Simple bigram model
 class BigramLanguageModel(nn.Module):
@@ -101,7 +144,8 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.sa_heads = MultiHeadAttention(num_heads=4, head_size=n_embd//4) # i.e. 4 heads of self attention, each with head size of n_embd//4
+        self.blocks = nn.Sequential(*[Block(n_embd, num_heads=4) for _ in range(n_layer)]) # n transformer blocks
+        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -110,7 +154,7 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device = device)) # (T, C)
         x = tok_emb + pos_emb # (B, T, C)
-        x = self.sa_heads(x) # Apply multiple heads of self attention (B, T, C)
+        x = self.blocks(x) # Apply the transformer blocks (B, T, C)
         logits = self.lm_head(x) # (B,T,vocab_size)
         if targets is None:
             loss = None
